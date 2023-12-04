@@ -1,0 +1,6 @@
+gcloud ai custom-jobs create \
+    --region=us-west1 \
+    --display-name=my-flood-detection-job \
+    --config=config.yaml \
+    --labels=version=1,type=training \
+    --service-account="${SERVICE_ACCOUNT}"
