@@ -1,0 +1,26 @@
+{
+    "optimizer": "adam",
+    "loss": {
+      "class_name": "BinaryCrossentropy",
+      "config": {
+        "reduction": "auto",
+        "name": "binary_crossentropy",
+        "from_logits": true,
+        "label_smoothing": 0.0,
+        "axis": -1
+      }
+    },
+    "metrics": [
+      {
+        "class_name": "BinaryAccuracy",
+        "config": {
+          "name": "binary_accuracy",
+          "dtype": "float32",
+          "threshold": 0.5
+        }
+      }
+    ],
+    "batch_size": 500,
+    "epochs": 1,
+    "k": 2
+  }
