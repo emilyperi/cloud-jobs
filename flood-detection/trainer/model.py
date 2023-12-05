@@ -9,7 +9,7 @@ from tensorflow.keras.callbacks import TensorBoard, ModelCheckpoint
 from tensorflow.keras.layers import BatchNormalization
 from tensorflow.keras.models import Sequential
 
-from trainer import TENSORBOARD_DIR, CHECKPOINT_DIR, CHECKPOINT_TEMPLATE, JOB_ID
+from trainer.env import TENSORBOARD_DIR, CHECKPOINT_DIR, CHECKPOINT_TEMPLATE, GPU_ENABLED
 from trainer.dtypes import Parameters, Score, ModelConfig
 from trainer.exceptions import UninitializedModelError, UntrainedModelError, KModelValueError
 from trainer.utils import get_function_stdout
@@ -20,16 +20,19 @@ class Model:
     log_dir = TENSORBOARD_DIR
     base_check_dir = CHECKPOINT_DIR
     check_template = CHECKPOINT_TEMPLATE
+    gpu_enabled = GPU_ENABLED
 
-    def __init__(self, model_id=0):
+    def __init__(self, model_id):
         self._model = None
         self._base_model = None
         self.history = None
+        self.model_id = model_id
 
+        self.tensorboard_dir = os.path.join(Model.log_dir, f"fold_{model_id}")
         self.checkpoint_dir = os.path.join(Model.base_check_dir, f"fold_{model_id}")
         checkpoint_path = os.path.join(self.checkpoint_dir, Model.check_template)
 
-        self.callbacks = [TensorBoard(log_dir=Model.log_dir, histogram_freq=1),
+        self.callbacks = [TensorBoard(log_dir=self.tensorboard_dir, histogram_freq=1),
                           ModelCheckpoint(filepath=checkpoint_path, save_weights_only=True, save_freq='epoch')]
 
     @property
@@ -61,7 +64,12 @@ class Model:
         if not self._model:
             raise UninitializedModelError("Cannot train an un-initialized model")
 
-        self._model.compile(optimizer=params.optimizer, loss=params.loss, metrics=params.metrics)
+        if self.gpu_enabled:
+            strategy = tensorflow.distribute.MirroredStrategy()
+            with strategy.scope():
+                self._model.compile(optimizer=params.optimizer, loss=params.loss, metrics=params.metrics)
+        else:
+            self._model.compile(optimizer=params.optimizer, loss=params.loss, metrics=params.metrics)
 
         logger.debug(f"checkpoint dir is {self.checkpoint_dir}")
         if tensorflow.io.gfile.exists(self.checkpoint_dir):
@@ -97,7 +105,6 @@ class Model:
             raise UninitializedModelError("Cannot save un-initialized model")
 
         logger.debug(f"Model save_path {save_path}")
-
         self._model.save(save_path)
 
     def load_weights(self, weights_path):

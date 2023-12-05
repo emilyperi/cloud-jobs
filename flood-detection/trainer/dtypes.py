@@ -1,7 +1,8 @@
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from enum import Enum
 from typing import Union, List, Tuple
-
+import json
+import numpy as np
 import tensorflow as tf
 
 
@@ -15,14 +16,24 @@ class Parameters:
     k: int = 10
 
     def serialize(self):
-        param_dict = asdict(self)
-        if isinstance(param_dict['optimizer'], tf.keras.optimizers.Optimizer):
-            param_dict['optimizer'] = tf.keras.optimizers.serialize(param_dict['optimizer'])
-        if isinstance(param_dict['loss'], tf.keras.losses.Loss):
-            param_dict['loss'] = tf.keras.losses.serialize(param_dict['loss'])
+        param_dict = {
+            'batch_size': self.batch_size,
+            'epochs': self.epochs,
+            'k': self.k
+        }
+
+        if isinstance(self.optimizer, tf.keras.optimizers.Optimizer):
+            param_dict['optimizer'] = tf.keras.optimizers.serialize(self.optimizer)
+        else:
+            param_dict['optimizer'] = self.optimizer
+
+        if isinstance(self.loss, tf.keras.losses.Loss):
+            param_dict['loss'] = tf.keras.losses.serialize(self.loss)
+        else:
+            param_dict["loss"] = self.loss
 
         metric_serialized = []
-        for metric in param_dict['metrics']:
+        for metric in self.metrics:
             if isinstance(metric, tf.keras.metrics.Metric):
                 metric_serialized.append(tf.keras.metrics.serialize(metric))
             else:
@@ -79,7 +90,10 @@ class ModelConfig:
     input_shape: Tuple[int, int, int] = (512, 512, 3)
 
     def serialize(self):
-        config_dict = asdict(self)
+        config_dict = {
+            "input_shape": self.input_shape
+        }
+
         layers_serialized = []
         for layer in self.layers:
             layers_serialized.append(tf.keras.layers.serialize(layer))
@@ -131,3 +145,11 @@ FILE_EXT_MAP = {
     DataType.PLOT: FileExt.PNG,
     DataType.IMAGE: FileExt.PNG
 }
+
+
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.float32):
+            return float(obj)
+        # Add more custom handlers here if needed
+        return json.JSONEncoder.default(self, obj)
