@@ -6,8 +6,10 @@ from datetime import datetime
 TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
 TRAIN_ENV = os.environ.get('TRAIN_ENV', 'cloud')
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
-K_FOLD = os.environ.get('K_FOLD', False)
-GPU_ENABLED = os.environ.get('GPU_ENABLED', False)
+
+K_FOLD = os.environ.get('K_FOLD', '0').lower() == '1'
+GPU_ENABLED = os.environ.get('GPU_ENABLED', '0').lower() == '1'
+
 
 # Paths for cloud runs (Vertex AI)
 CLOUD_MODEL_DIR = os.environ.get('AIP_MODEL_DIR', None)
