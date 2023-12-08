@@ -1,5 +1,24 @@
 {
-    "optimizer": "adam",
+  "optimizer": {
+    "class_name": "Custom>Adam",
+    "config": {
+      "name": "Adam",
+      "weight_decay": null,
+      "clipnorm": null,
+      "global_clipnorm": null,
+      "clipvalue": null,
+      "use_ema": false,
+      "ema_momentum": 0.99,
+      "ema_overwrite_frequency": null,
+      "jit_compile": false,
+      "is_legacy_optimizer": false,
+      "learning_rate": 0.0005,
+      "beta_1": 0.9,
+      "beta_2": 0.999,
+      "epsilon": 1e-07,
+      "amsgrad": false
+    }
+  },
     "loss": {
       "class_name": "BinaryCrossentropy",
       "config": {
@@ -20,7 +39,7 @@
         }
       }
     ],
-    "batch_size": 500,
-    "epochs": 1,
-    "k": 2
+    "batch_size": 32,
+    "epochs": 20,
+    "k": 5
   }

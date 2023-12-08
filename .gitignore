@@ -3,6 +3,9 @@ __pycache__/
 data/
 logs/
 tensorboard/
-models/
+model/
 plots/
 venv/
+checkpoints/
+dist/
+trainer.egg-info/

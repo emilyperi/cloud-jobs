@@ -3,16 +3,15 @@ from typing import List, Tuple
 
 import numpy as np
 from sklearn.model_selection import StratifiedKFold
-import tensorflow
+import tensorflow as tf
 from tensorflow.keras.applications import ResNet50
-from tensorflow.keras.callbacks import TensorBoard, ModelCheckpoint
-from tensorflow.keras.layers import BatchNormalization
-from tensorflow.keras.models import Sequential
+from tensorflow.keras.callbacks import TensorBoard, ModelCheckpoint, EarlyStopping
+from tensorflow.keras.layers import BatchNormalization, Input
 
-from trainer import TENSORBOARD_DIR, CHECKPOINT_DIR, CHECKPOINT_TEMPLATE, JOB_ID
+from trainer.env import TENSORBOARD_DIR, CHECKPOINT_DIR, CHECKPOINT_TEMPLATE, GPU_ENABLED
 from trainer.dtypes import Parameters, Score, ModelConfig
 from trainer.exceptions import UninitializedModelError, UntrainedModelError, KModelValueError
-from trainer.utils import get_function_stdout
+from trainer.utils import get_function_stdout, sigmoid
 from trainer.logging import logger
 
 
@@ -20,17 +19,21 @@ class Model:
     log_dir = TENSORBOARD_DIR
     base_check_dir = CHECKPOINT_DIR
     check_template = CHECKPOINT_TEMPLATE
+    gpu_enabled = GPU_ENABLED
 
-    def __init__(self, model_id=0):
+    def __init__(self, model_id):
         self._model = None
         self._base_model = None
         self.history = None
+        self.model_id = model_id
 
+        self.tensorboard_dir = os.path.join(Model.log_dir, f"fold_{model_id}")
         self.checkpoint_dir = os.path.join(Model.base_check_dir, f"fold_{model_id}")
         checkpoint_path = os.path.join(self.checkpoint_dir, Model.check_template)
 
-        self.callbacks = [TensorBoard(log_dir=Model.log_dir, histogram_freq=1),
-                          ModelCheckpoint(filepath=checkpoint_path, save_weights_only=True, save_freq='epoch')]
+        self.callbacks = [TensorBoard(log_dir=self.tensorboard_dir, histogram_freq=1),
+                          ModelCheckpoint(filepath=checkpoint_path, save_weights_only=True, save_freq='epoch'),
+                          EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)]
 
     @property
     def model(self):
@@ -38,16 +41,45 @@ class Model:
 
     @model.setter
     def model(self, config: ModelConfig):
-        base_model = ResNet50(weights='imagenet', include_top=False, input_shape=config.input_shape)
-
-        # Make base layers non-trainable
-        for layer in base_model.layers:
-            layer.trainable = False
-
-        model = Sequential([base_model, *config.layers])
-        logger.debug(f"Model Summary {get_function_stdout(model.summary)}")
+        if config.saved_model:
+            model, base_model = self.load_model(config.saved_model)
+        else:
+            model, base_model = self.create_model(config)
+        logger.debug(f"Model {self.model_id} Summary {get_function_stdout(model.summary)}")
         self._model = model
         self._base_model = base_model
+
+    def create_model(self, config: ModelConfig):
+        image_input = Input(shape=config.input_shape, name='image_input')
+
+        # Data augmentation layers (if required)
+        if config.data_augmentation:
+            logger.debug("Adding data augmentation layers")
+            x = tf.keras.layers.RandomFlip("horizontal")(image_input)
+            x = tf.keras.layers.RandomRotation(0.1)(x)
+            x = tf.keras.layers.RandomZoom(0.1)(x)
+        else:
+            x = image_input
+
+        # ResNet50 as the base model
+        base_model = ResNet50(weights='imagenet', include_top=False, input_tensor=x)
+        base_model.trainable = False
+
+        # Adding the base model
+        x = base_model(x)
+
+        for layer in config.layers:
+            x = layer(x)
+
+        # Create the model
+        model = tf.keras.models.Model(inputs=image_input, outputs=x)
+
+        return model, base_model
+
+    def load_model(self, load_path):
+        model = tf.keras.models.load_model(load_path.format(self.model_id))
+        base_model = model.get_layer(index=0) if hasattr(model, 'get_layer') else None
+        return model, base_model
 
     def unfreeze_layers(self, n_layers):
         if not self._base_model:
@@ -61,11 +93,16 @@ class Model:
         if not self._model:
             raise UninitializedModelError("Cannot train an un-initialized model")
 
-        self._model.compile(optimizer=params.optimizer, loss=params.loss, metrics=params.metrics)
+        if self.gpu_enabled:
+            strategy = tf.distribute.MirroredStrategy()
+            with strategy.scope():
+                self._model.compile(optimizer=params.optimizer, loss=params.loss, metrics=params.metrics)
+        else:
+            self._model.compile(optimizer=params.optimizer, loss=params.loss, metrics=params.metrics)
 
-        logger.debug(f"checkpoint dir is {self.checkpoint_dir}")
-        if tensorflow.io.gfile.exists(self.checkpoint_dir):
-            latest_checkpoint = tensorflow.train.latest_checkpoint(self.checkpoint_dir)
+        if tf.io.gfile.exists(self.checkpoint_dir):
+            logger.debug(f"Loading from checkpoint {self.checkpoint_dir}")
+            latest_checkpoint = tf.train.latest_checkpoint(self.checkpoint_dir)
             self.load_weights(latest_checkpoint)
 
         train_images, train_labels = train_data
@@ -79,17 +116,19 @@ class Model:
 
         self.history = history.history
 
-    def predict(self, test_images):
+    def predict(self, test_images, apply_sigmoid=True):
         if not self._model:
             raise UninitializedModelError("Cannot make predictions with un-initialized model")
+
+        if apply_sigmoid:
+            return sigmoid(self._model.predict(test_images))
 
         return self._model.predict(test_images)
 
-    def binary_predict(self, test_images, threshold=0.5):
+    def binary_labels(self, predictions, threshold=0.5):
         if not self._model:
             raise UninitializedModelError("Cannot make predictions with un-initialized model")
 
-        predictions = self.predict(test_images)
         return np.where(predictions > threshold, 1, 0)
 
     def save(self, save_path):
@@ -97,7 +136,6 @@ class Model:
             raise UninitializedModelError("Cannot save un-initialized model")
 
         logger.debug(f"Model save_path {save_path}")
-
         self._model.save(save_path)
 
     def load_weights(self, weights_path):
@@ -105,6 +143,12 @@ class Model:
             raise UninitializedModelError("Cannot load weights for un-initialized model")
 
         self._model.load_weights(weights_path)
+
+    def evaluate(self, test_images, test_labels):
+        if not self._model:
+            raise UninitializedModelError("Cannot load model for un-initialized model")
+
+        return self._model.v(test_images, test_labels)
 
     def get_score(self, metric_key):
         if not self.history:
@@ -131,22 +175,33 @@ class KModels:
 
     def load_weights(self, weights_paths: List[str]):
         if len(weights_paths) != len(self.models):
-            raise KModelValueError(f"Number of weights {weights_paths} does not match number of models {len(self.models)}")
+            raise KModelValueError(
+                f"Number of weights {weights_paths} does not match number of models {len(self.models)}")
 
         for i, model in enumerate(self.models):
             model.load_weights(weights_paths[i])
 
-    def init_split(self, k, train_images, train_labels, random_state, save=True):
-        skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=random_state)
+    def evaluate_models(self, test_images, test_labels):
+        losses = []
+        metrics = []
+
+        for model in self.models:
+            loss, metric = model.evaluate(test_images, test_labels)
+            losses.append(loss)
+            metrics.append(metric)
+
+        return losses, metrics
+
+    def init_split(self, train_images, train_labels, random_state=13):
+        skf = StratifiedKFold(n_splits=self.k, shuffle=True, random_state=random_state)
         split_indices = list(skf.split(train_images, train_labels))
-        if save:
-            self.split = split_indices
+        self.split = split_indices
 
         return split_indices
 
-    def kfold_train(self, train_data: Tuple, params: Parameters, random_state=13):
+    def kfold_train(self, train_data: Tuple, params: Parameters):
         train_images, train_labels = train_data
-        splits = self.init_split(params.k, train_images, train_labels, random_state)
+        splits = self.split
 
         for i, (train_index, val_index) in enumerate(splits):
             logger.debug(f'Beginning Fold {i}')
@@ -157,16 +212,48 @@ class KModels:
 
             self.scores.append(model.get_score(metric_key=params.metric_key()))
 
-    def ensemble_predict(self, test_images, threshold=0.5):
+    def ensemble_predict(self, test_images, apply_sigmoid=True):
         sum_k_pred = np.zeros((test_images.shape[0],))
         for model in self.models:
-            pred = model.predict(test_images).squeeze()
+            pred = model.predict(test_images, apply_sigmoid=apply_sigmoid).squeeze()
             sum_k_pred += pred
 
         averaged_pred = sum_k_pred / self.k
-        binary_labels = np.where(averaged_pred > threshold, 1, 0)
 
-        return averaged_pred, binary_labels
+        return averaged_pred
+
+    def binary_labels(self, predictions, threshold):
+        binary_labels = []
+        for i, model in enumerate(self.models):
+            binary_labels.append(model.binary_labels(predictions[i], threshold=threshold))
+
+        return binary_labels
+
+    def val_predictions(self, images, labels, apply_sigmoid=True):
+        predictions = []
+        true_labels = []
+        for i, (train_index, val_index) in enumerate(self.split):
+            logger.debug(f'Beginning predictions for model {i}')
+            model = self.models[i]
+            predictions.append(model.predict(images[val_index], apply_sigmoid=apply_sigmoid))
+            true_labels.append(labels[val_index])
+        return predictions, true_labels
+
+    def train_predictions(self, images, labels, apply_sigmoid=True):
+        predictions = []
+        true_labels = []
+        for i, (train_index, val_index) in enumerate(self.split):
+            logger.debug(f'Beginning predictions for model {i}')
+            model = self.models[i]
+            predictions.append(model.predict(images[train_index], apply_sigmoid=apply_sigmoid))
+            true_labels.append(labels[train_index])
+        return predictions, true_labels
+
+    def test_predictions(self, test_images, apply_sigmoid=True):
+        predictions = []
+        for model in self.models:
+            predictions.append(model.predict(test_images, apply_sigmoid=apply_sigmoid))
+        return predictions
 
     def get_validation_indices(self):
         if not self.split:

@@ -1,7 +1,8 @@
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from enum import Enum
 from typing import Union, List, Tuple
-
+import json
+import numpy as np
 import tensorflow as tf
 
 
@@ -15,14 +16,24 @@ class Parameters:
     k: int = 10
 
     def serialize(self):
-        param_dict = asdict(self)
-        if isinstance(param_dict['optimizer'], tf.keras.optimizers.Optimizer):
-            param_dict['optimizer'] = tf.keras.optimizers.serialize(param_dict['optimizer'])
-        if isinstance(param_dict['loss'], tf.keras.losses.Loss):
-            param_dict['loss'] = tf.keras.losses.serialize(param_dict['loss'])
+        param_dict = {
+            'batch_size': self.batch_size,
+            'epochs': self.epochs,
+            'k': self.k
+        }
+
+        if isinstance(self.optimizer, tf.keras.optimizers.Optimizer):
+            param_dict['optimizer'] = tf.keras.optimizers.serialize(self.optimizer)
+        else:
+            param_dict['optimizer'] = self.optimizer
+
+        if isinstance(self.loss, tf.keras.losses.Loss):
+            param_dict['loss'] = tf.keras.losses.serialize(self.loss)
+        else:
+            param_dict["loss"] = self.loss
 
         metric_serialized = []
-        for metric in param_dict['metrics']:
+        for metric in self.metrics:
             if isinstance(metric, tf.keras.metrics.Metric):
                 metric_serialized.append(tf.keras.metrics.serialize(metric))
             else:
@@ -77,9 +88,16 @@ class Score:
 class ModelConfig:
     layers: List[tf.keras.layers.Layer]
     input_shape: Tuple[int, int, int] = (512, 512, 3)
+    saved_model: str = None
+    data_augmentation: bool = False
 
     def serialize(self):
-        config_dict = asdict(self)
+        config_dict = {
+            "input_shape": self.input_shape,
+            "saved_model": self.saved_model,
+            "data_augmentation": self.data_augmentation
+        }
+
         layers_serialized = []
         for layer in self.layers:
             layers_serialized.append(tf.keras.layers.serialize(layer))
@@ -91,12 +109,36 @@ class ModelConfig:
     def deserialize(cls, config):
         input_shape = tuple(config.get('input_shape', (512, 512, 3)))
         layers = config.get('layers')
+        saved_model = config.get("saved_model")
+        data_augmentation = config.get("data_augmentation", False)
         if not layers:
             raise ValueError('layers parameter required')
 
         layers = [tf.keras.layers.deserialize(layer) for layer in layers]
 
-        return cls(input_shape=input_shape, layers=layers)
+        return cls(input_shape=input_shape, layers=layers, saved_model=saved_model, data_augmentation=data_augmentation)
+
+
+class ModelType(Enum):
+    K_FOLD = "k_fold"
+    SINGLE = "single"
+
+
+class PlotType(Enum):
+    PR_CURVE = "pr_curve"
+
+
+class ModelTask(Enum):
+    PLOT = "plot"
+    EVALUATE = "evaluate"
+    PREDICT = "predict"
+    TRAIN = "train"
+    TUNE = "tune"
+    PROCESS_IMAGES = "process_images"
+    SPLIT_TRAIN_TEST = "split_train_test"
+    LOAD_MODEL = "load_model"
+    SAVE_MODEL = "save_model"
+    SAVE_METADATA = "save_metadata"
 
 
 class DataType(Enum):
@@ -131,3 +173,11 @@ FILE_EXT_MAP = {
     DataType.PLOT: FileExt.PNG,
     DataType.IMAGE: FileExt.PNG
 }
+
+
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.float32):
+            return float(obj)
+        # Add more custom handlers here if needed
+        return json.JSONEncoder.default(self, obj)

@@ -7,7 +7,7 @@ setup(
     package_data={'trainer': ['configs/*.json']},
     install_requires=[
         'numpy>=1.18.0',
-        'tensorflow>=2.5.0',
+        'tensorflow>=2.12.0',
         'scikit-learn>=1.0.0',
         'matplotlib>=3.0.0',
         'google-cloud-logging',

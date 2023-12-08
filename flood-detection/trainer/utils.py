@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import math
+import os.path
 from contextlib import redirect_stdout
 from typing import List, TYPE_CHECKING
 
@@ -11,7 +12,7 @@ import numpy as np
 from sklearn.metrics import precision_recall_curve
 from sklearn.model_selection import train_test_split
 
-from trainer.dtypes import Score, DataType, DataSource, Parameters, ModelConfig, FILE_EXT_MAP
+from trainer.dtypes import Score, DataType, DataSource, Parameters, ModelConfig, CustomJSONEncoder, FILE_EXT_MAP
 from trainer.exceptions import UtilsIOException, UtilsValueException
 
 
@@ -129,35 +130,37 @@ def plot_precision_recall(num_curves, predicted_labels, true_labels, from_logits
         plt.show()
 
 
-def create_save_path(data_type: DataType, data_source: DataSource, base_path: str, suffix: str = None):
-    path = f'{base_path}/{data_source.value}_{data_type.value}'
+def format_filename(data_type: DataType, data_source: DataSource, suffix: str = None, ext: bool = True):
+    filename = f'{data_source.value}_{data_type.value}'
+
     if suffix:
-        path = f'{path}_{suffix}'
+        filename = f'{filename}_{suffix}'
 
     file_ext = FILE_EXT_MAP.get(data_type)
-    if file_ext:
-        return f'{path}.{file_ext.value}'
-    return path
+    if ext and file_ext:
+        return f'{filename}.{file_ext.value}'
+    return filename
 
 
-def save_models(models: List[Model], data_source: DataSource, base_path: str):
+def save_models(models: List[Model], data_source: DataSource, base_path: str, env: str):
+
     for i, model in enumerate(models):
-        save_path = create_save_path(data_type=DataType.MODEL, data_source=data_source, base_path=base_path, suffix=str(i))
+        suffix = f"fold_{model.model_id}"
+        filename = format_filename(DataType.MODEL, data_source, suffix=suffix, ext=False)
+        save_path = os.path.join(base_path, filename)
         try:
             model.save(save_path)
         except IOError:
             raise UtilsIOException(f"Error saving model to save_path {save_path}")
 
 
-def save_meta_data(params: Parameters, model_config: ModelConfig, data_source: DataSource, model_id: str,
-                   base_path: str):
+def save_meta_data(params: Parameters, model_config: ModelConfig, save_path: str):
     params_dict = params.serialize()
     mconfig_dict = model_config.serialize()
     meta_data = dict(parameters=params_dict, model_config=mconfig_dict)
-    save_path = create_save_path(data_type=DataType.METADATA, data_source=data_source, base_path=base_path, suffix=model_id)
     try:
         with open(save_path, 'w') as file:
-            json.dump(meta_data, file, indent=4)
+            json.dump(meta_data, file, indent=4, cls=CustomJSONEncoder)
     except IOError:
         raise UtilsIOException(f"Cannot save data to file {save_path}")
     except TypeError as e:
@@ -201,19 +204,3 @@ def display_images(num_images, rgb_images, captions=None, save_path=None, show=T
 def get_mislabeled_indices(true_labels, predicted_labels):
     return [i for i, (true, pred) in enumerate(zip(true_labels, predicted_labels)) if true != pred]
 
-
-def get_k_predictions(models: List[Model], indices, train_images, train_labels):
-    if len(indices) != len(models):
-        raise UtilsValueException(f'Number of models {len(models)} must match number of folds {len(indices)}')
-
-    predictions = []
-    labels = []
-    for i, index in enumerate(indices):
-        model = models[i]
-        try:
-            predictions.append(model.predict(train_images[index]).squeeze())
-            labels.append(train_labels[index])
-        except IndexError:
-            raise UtilsValueException(f"Could not get get images or labels with index {index}")
-
-    return predictions, labels

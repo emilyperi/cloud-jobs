@@ -66,5 +66,6 @@
     512,
     512,
     3
-  ]
+  ],
+  "data_augmentation": true
 }
