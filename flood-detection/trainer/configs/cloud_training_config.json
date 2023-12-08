@@ -1,0 +1,5 @@
+{
+  "train_env": "cloud",
+  "log_level": "INFO",
+
+}

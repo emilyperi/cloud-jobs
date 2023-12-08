@@ -143,11 +143,10 @@ def format_filename(data_type: DataType, data_source: DataSource, suffix: str = 
 
 
 def save_models(models: List[Model], data_source: DataSource, base_path: str, env: str):
-    ext = False if env.lower() == "cloud" else True
 
     for i, model in enumerate(models):
         suffix = f"fold_{model.model_id}"
-        filename = format_filename(DataType.MODEL, data_source, suffix=suffix, ext=ext)
+        filename = format_filename(DataType.MODEL, data_source, suffix=suffix, ext=False)
         save_path = os.path.join(base_path, filename)
         try:
             model.save(save_path)
@@ -205,17 +204,3 @@ def display_images(num_images, rgb_images, captions=None, save_path=None, show=T
 def get_mislabeled_indices(true_labels, predicted_labels):
     return [i for i, (true, pred) in enumerate(zip(true_labels, predicted_labels)) if true != pred]
 
-
-def get_k_predictions(models: List[Model], indices, train_images, train_labels):
-    if len(indices) != len(models):
-        raise UtilsValueException(f'Number of models {len(models)} must match number of folds {len(indices)}')
-
-    predictions = []
-    for i, index in enumerate(indices):
-        model = models[i]
-        try:
-            predictions.append(model.predict(train_images[index]).squeeze())
-        except IndexError:
-            raise UtilsValueException(f"Could not get get images or labels with index {index}")
-
-    return predictions

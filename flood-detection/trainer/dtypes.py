@@ -88,10 +88,14 @@ class Score:
 class ModelConfig:
     layers: List[tf.keras.layers.Layer]
     input_shape: Tuple[int, int, int] = (512, 512, 3)
+    saved_model: str = None
+    data_augmentation: bool = False
 
     def serialize(self):
         config_dict = {
-            "input_shape": self.input_shape
+            "input_shape": self.input_shape,
+            "saved_model": self.saved_model,
+            "data_augmentation": self.data_augmentation
         }
 
         layers_serialized = []
@@ -105,12 +109,36 @@ class ModelConfig:
     def deserialize(cls, config):
         input_shape = tuple(config.get('input_shape', (512, 512, 3)))
         layers = config.get('layers')
+        saved_model = config.get("saved_model")
+        data_augmentation = config.get("data_augmentation", False)
         if not layers:
             raise ValueError('layers parameter required')
 
         layers = [tf.keras.layers.deserialize(layer) for layer in layers]
 
-        return cls(input_shape=input_shape, layers=layers)
+        return cls(input_shape=input_shape, layers=layers, saved_model=saved_model, data_augmentation=data_augmentation)
+
+
+class ModelType(Enum):
+    K_FOLD = "k_fold"
+    SINGLE = "single"
+
+
+class PlotType(Enum):
+    PR_CURVE = "pr_curve"
+
+
+class ModelTask(Enum):
+    PLOT = "plot"
+    EVALUATE = "evaluate"
+    PREDICT = "predict"
+    TRAIN = "train"
+    TUNE = "tune"
+    PROCESS_IMAGES = "process_images"
+    SPLIT_TRAIN_TEST = "split_train_test"
+    LOAD_MODEL = "load_model"
+    SAVE_MODEL = "save_model"
+    SAVE_METADATA = "save_metadata"
 
 
 class DataType(Enum):

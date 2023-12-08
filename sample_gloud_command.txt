@@ -4,3 +4,6 @@ gcloud ai custom-jobs create \
     --config=config.yaml \
     --labels=version=1,type=training \
     --service-account="${SERVICE_ACCOUNT}"
+
+
+export SERVICE_ACCOUNT="flying-saucer-sauce@certain-density-406704.iam.gserviceaccount.com"
