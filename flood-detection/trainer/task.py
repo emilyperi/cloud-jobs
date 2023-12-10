@@ -6,18 +6,25 @@ from typing import List, Union, Dict
 
 import numpy as np
 from tensorflow.keras.applications.resnet50 import preprocess_input
-from tensorflow.keras.layers import Dense, Flatten
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Conv2D, BatchNormalization, Activation
 from tensorflow.keras.losses import BinaryCrossentropy
 from tensorflow.keras.metrics import BinaryAccuracy
 from tensorflow.keras.optimizers import Adam
 
-from trainer.env import config
+from trainer.cloud_env import cloud_config
+from trainer.local_env import local_config
+from trainer.env import TRAIN_ENV, MODEL_TYPE
 from trainer.dtypes import Parameters, ModelConfig, DataSource, DataType, ModelType, ModelTask, PlotType
 from trainer.model import KModels, Model
-from trainer.logging import logger, upload_blob
+from trainer.logging import logger, TEMP_LOG_FILE_NAME, LOG_SAVE_PATH
 from trainer.utils import split_indices, save_models, format_filename, save_meta_data, \
     plot_precision_recall, load_json_config, k_score_summary
+from gstorage import download_blob, upload_blob
 
+if TRAIN_ENV == 'cloud':
+    config = cloud_config
+else:
+    config = local_config
 
 
 def get_args():
@@ -101,14 +108,14 @@ def get_args():
         help='Skips saving the model'
     )
     parser.add_argument(
-        '--split-train-test',
+        '--split-data',
         action='store_true',
-        help='Skips saving the model'
+        help='Splits data set into train, validation, and test sets'
     )
     parser.add_argument(
         '--process-images',
         action='store_true',
-        help='Skips saving the model'
+        help='processed raw images'
     )
     parser.add_argument(
         '--evaluate',
@@ -125,7 +132,12 @@ def get_args():
         action='store_true',
         help='Makes predictions on the loaded model(s)'
     )
-
+    parser.add_argument(
+        '--min-epochs',
+        type=int,
+        default=1,
+        help='Number of required epochs before early stopping'
+    )
     return parser.parse_args()
 
 
@@ -175,7 +187,14 @@ def initialize_model_config(input_shape, config_file, saved_model=None, data_aug
     if config_file:
         model_config = ModelConfig.deserialize(config=load_json_config(config_file))
     else:
-        model_config = ModelConfig(layers=[Flatten(), Dense(256, activation='relu'), Dense(1)], input_shape=input_shape)
+        top_layers = [GlobalAveragePooling2D(), Dense(256, activation='relu'), Dense(1)]
+        bottom_layers = [Conv2D(filters=64, kernel_size=(7, 7), strides=(2, 2), padding='same'),
+                         BatchNormalization(),
+                         Activation('relu')]
+
+        model_config = ModelConfig(top_layers=top_layers,
+                                   input_shape=input_shape,
+                                   bottom_layers=bottom_layers)
 
     if saved_model:
         model_config.saved_model = saved_model
@@ -189,28 +208,28 @@ def initialize_model_config(input_shape, config_file, saved_model=None, data_aug
 def load_data(model_tasks: List[ModelTask]):
     val_labels, val_images = None, None
     test_labels, test_images = None, None
+    train_images, train_labels = None, None
 
-    logger.info("Loading training data")
-    train_labels = np.load(config["TRAIN_LABELS_FILE_PATH"])
-    train_images = np.load(config["TRAIN_IMG_FILE_PATH"])
-    if config.get("VAL_LABELS_FILE_PATH"):
+    if MODEL_TYPE == 'single':
+        logger.info("Loading training data")
+        train_labels = np.load(config["TRAIN_LABELS_FILE_PATH"])
+        train_images = np.load(config["TRAIN_IMG_FILE_PATH"])
         val_labels = np.load(config["VAL_LABELS_FILE_PATH"])
-    if config.get("VAL_IMG_FILE_PATH"):
         val_images = np.load(config["VAL_IMG_FILE_PATH"])
+    else:
+        labels = np.load(config["RAW_LABELS_FILE_PATH"])
+        images = np.load(config["RAW_IMG_FILE_PATH"])
 
-    if ModelTask.EVALUATE in model_tasks:
-        logger.info("Loading test data")
-        if config.get("TEST_LABELS_FILE_PATH"):
-            test_labels = np.load(config["TEST_LABELS_FILE_PATH"])
-        if config.get("TEST_IMG_FILE_PATH"):
-            test_images = np.load(config["TRAIN_IMG_FILE_PATH"])
-
-    if ModelTask.SPLIT_TRAIN_TEST in model_tasks:
         logger.info("Splitting data into train and test sets")
-        indices = np.arange(len(train_images))
+        indices = np.arange(len(images))
         train_indices, test_indices = split_indices(indices, train_labels)
-        train_images, test_images = train_images[train_indices], train_images[test_indices]
-        train_labels, test_labels = train_labels[train_indices], train_labels[test_indices]
+        train_images, test_images = images[train_indices], images[test_indices]
+        train_labels, test_labels = labels[train_indices], labels[test_indices]
+
+    if ModelTask.EVALUATE in model_tasks and MODEL_TYPE == 'single':
+        logger.info("Loading test data")
+        test_labels = np.load(config["TEST_LABELS_FILE_PATH"])
+        test_images = np.load(config["TEST_IMG_FILE_PATH"])
 
     if ModelTask.PROCESS_IMAGES in model_tasks:
         train_images = preprocess_input(train_images)
@@ -242,22 +261,26 @@ def get_predictions(data, model, prediction_type, threshold):
         else:
             predictions = model.predict(data.get("test_images"))
         true_labels = data.get("test_labels")
+        logger.info(f"Length true labels {len(true_labels)}")
+        logger.info(f"Length of predictions {len(predictions)}")
+        np.save("test_predictions.npy", predictions)
     else:
         assert isinstance(model, KModels)
         true_labels = data.get("test_labels")
         predictions = model.ensemble_predict(data.get("test_images"))
+
 
     predicted_labels = model.binary_labels(predictions, threshold=threshold)
 
     return predictions, predicted_labels, true_labels
 
 
-def initialize_model(k: int, model_id: int, model_config: ModelConfig, model_type: ModelType):
+def initialize_model(k: int, model_id: int, model_config: ModelConfig, model_type: ModelType, min_epochs: int):
     if model_type == ModelType.K_FOLD:
-        model = KModels(k=k)
+        model = KModels(k=k, min_epochs=min_epochs)
         model.init_models(model_config)
     else:
-        model = Model(model_id=model_id)
+        model = Model(model_id=model_id, min_epochs=min_epochs)
         model.model = model_config
     return model
 
@@ -291,6 +314,35 @@ def get_load_dir(model_list: List[Model], model_dir: str, data_source: DataSourc
     return load_paths
 
 
+def save_split_data(model, data):
+    test_images = data["test_images"]
+    test_labels = data["test_labels"]
+    all_train_images = data["train_images"]
+    all_train_labels = data["train_labels"]
+
+    train_img_file_path = os.path.join(config["TRAIN_DATA_DIR"], "train_images_{}.npy")
+    train_labels_file_path = os.path.join(config["TRAIN_DATA_DIR"], "train_labels_{}.npy")
+    val_img_file_path = os.path.join(config["VAL_DATA_DIR"], "val_images_{}.npy")
+    val_labels_file_path = os.path.join(config["VAL_DATA_DIR"], "val_labels_{}.npy")
+    test_img_file_path = os.path.join(config["TEST_DATA_DIR"], "test_images.npy")
+    test_labels_file_path = os.path.join(config["TEST_DATA_DIR"], "test_labels.npy")
+
+    save_data_fp = [train_img_file_path, train_labels_file_path, val_img_file_path, val_labels_file_path]
+
+    for model_id, (train_index, val_index) in enumerate(model.split):
+        save_data = [all_train_images[train_index],
+                     all_train_labels[train_index],
+                     all_train_images[val_index],
+                     all_train_labels[val_index]]
+
+        for item, fp in enumerate(save_data_fp):
+            fp = fp.format(model_id)
+            np.save(fp, save_data[item])
+
+    np.save(test_labels_file_path, test_labels)
+    np.save(test_img_file_path, test_images)
+
+
 def main():
     args = get_args()
     k = args.k
@@ -302,6 +354,9 @@ def main():
     model_config_file = get_config_file_path(args.model_config)
     parameter_config_file = get_config_file_path(args.parameter_config)
     data_augmentation = args.data_augmentation
+    min_epochs = args.min_epochs
+
+    logger.info(f"Job configuration values: {config}")
 
     model_tasks = []
     if args.plot:
@@ -314,8 +369,8 @@ def main():
         model_tasks.append(ModelTask.PREDICT)
     if args.load_model:
         model_tasks.append(ModelTask.LOAD_MODEL)
-    if args.split_train_test:
-        model_tasks.append(ModelTask.SPLIT_TRAIN_TEST)
+    if args.split_data:
+        model_tasks.append(ModelTask.SPLIT_DATA)
     if args.process_images:
         model_tasks.append(ModelTask.PROCESS_IMAGES)
     if args.fine_tune:
@@ -325,14 +380,14 @@ def main():
     if args.save_metadata:
         model_tasks.append(ModelTask.SAVE_METADATA)
 
-    if config["MODEL_TYPE"].lower() == ModelType.K_FOLD.value:
+    if MODEL_TYPE == ModelType.K_FOLD.value:
         model_type = ModelType.K_FOLD
     else:
         model_type = ModelType.SINGLE
 
     plot_type = PlotType.PR_CURVE
 
-    is_cloud_env = config["TRAIN_ENV"].lower() == "cloud"
+    is_cloud_env = TRAIN_ENV == "cloud"
 
     parameters = None
     model_config = None
@@ -341,7 +396,7 @@ def main():
         saved_model = None
         if ModelTask.LOAD_MODEL in model_tasks:
             saved_model = os.path.join(config["MODEL_LOAD_DIR"], config["SAVED_MODEL_TEMPLATE"])
-        model_config = initialize_model_config(input_shape=(512, 512, 3), config_file=model_config_file,
+        model_config = initialize_model_config(input_shape=(416, 416, 2), config_file=model_config_file,
                                                saved_model=saved_model, data_augmentation=data_augmentation)
         parameters = initialize_parameters(k=k, batch_size=batch_size, epochs=epochs, config_file=parameter_config_file)
     except Exception:
@@ -358,7 +413,7 @@ def main():
         return
 
     try:
-        model = initialize_model(k=k, model_id=config["MODEL_ID"], model_config=model_config, model_type=model_type)
+        model = initialize_model(k=k, model_id=config["MODEL_ID"], model_config=model_config, model_type=model_type, min_epochs=min_epochs)
         if model_type == ModelType.K_FOLD:
             model.init_split(train_images=data["train_images"], train_labels=data["train_labels"])
             data["val_indices"] = model.get_validation_indices()
@@ -366,6 +421,13 @@ def main():
     except Exception as e:
         logger.exception(f"Failed to initialize the model {str(e)}")
         return
+
+    if ModelTask.SPLIT_DATA in model_tasks and model_type == ModelType.K_FOLD:
+        try:
+            save_split_data(model, data)
+        except Exception as e:
+            logger.exception(f"Failed to save split data sets {str(e)}")
+            return
 
     if ModelTask.TRAIN in model_tasks or ModelTask.TUNE in model_tasks:
         try:
@@ -388,7 +450,11 @@ def main():
         try:
             models_list = get_models_list(model)
             base_path = config["MODEL_SAVE_DIR"]
-            save_models(models=models_list, data_source=DataSource.RBG, base_path=base_path, env=config["TRAIN_ENV"])
+            if TRAIN_ENV == 'local':
+                ext = True
+            else:
+                ext = False
+            save_models(models=models_list, data_source=DataSource.SAR, base_path=base_path, ext=ext)
         except Exception as e:
             logger.exception(f"Saving model failed: {str(e)}")
 
@@ -402,7 +468,7 @@ def main():
                     config["TEMP_META_DATA_FILES"].append(save_path)
                 else:
                     suffix = f"fold_{m.model_id}"
-                    file_name = format_filename(DataType.METADATA, DataSource.RBG, suffix=suffix)
+                    file_name = format_filename(DataType.METADATA, DataSource.SAR, suffix=suffix)
                     base_path = config["METADATA_DIR"]
                     save_path = os.path.join(base_path, file_name)
 
@@ -412,7 +478,8 @@ def main():
 
     if ModelTask.PREDICT in model_tasks:
         try:
-            predictions, binary_labels, true_labels = get_predictions(data=data, prediction_type=prediction_type, threshold=threshold)
+            predictions, binary_labels, true_labels = get_predictions(data=data, prediction_type=prediction_type,
+                                                                      threshold=threshold)
             logger.info(f"Predictions: {predictions}, Predicted Labels: {binary_labels}")
         except Exception as e:
             logger.exception(f"Predictions failed {str(e)}")
@@ -431,6 +498,8 @@ def main():
             if model_type == ModelType.K_FOLD:
                 loss, metric = model.evaluate_models(test_images=test_images, test_labels=test_labels)
             else:
+                if not model.is_compiled():
+                    model.compile(optimizer=parameters.optimizer, loss=parameters.loss, metrics=parameters.metrics)
                 loss, metric = model.evaluate(test_images=test_images, test_labels=test_labels)
             logger.info(f"Test Loss: {loss}, Test Metric: {metric}")
         except Exception as e:
@@ -439,7 +508,7 @@ def main():
     if is_cloud_env:
         try:
             logger.info("Uploading temporary log file to storage")
-            upload_blob()
+            upload_blob(TEMP_LOG_FILE_NAME, LOG_SAVE_PATH)
 
             logger.info("Uploading temporary metadata files to storage")
             models_list = get_models_list(model)
@@ -448,7 +517,7 @@ def main():
                 save_filename = format_filename(DataType.METADATA, DataSource.RBG, suffix=suffix)
                 base_path = config["METADATA_DIR"]
                 destination = os.path.join(base_path, save_filename)
-                upload_blob(config["BUCKET"], filepath, destination)
+                upload_blob(filepath, destination)
 
         except Exception as e:
             logger.exception(f"Failed to upload temp file or metadata to storage {str(e)}")

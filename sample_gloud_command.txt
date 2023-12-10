@@ -7,3 +7,27 @@ gcloud ai custom-jobs create \
 
 
 export SERVICE_ACCOUNT="flying-saucer-sauce@certain-density-406704.iam.gserviceaccount.com"
+
+us-west1-docker.pkg.dev/certain-density-406704/my-docker-repo/flood-detection-training-tf-cpu.2-13.py310
+docker push us-west1-docker.pkg.dev/certain-density-406704/my-docker-repo/flood-detection-training-tf-cpu.2-13.py310
+
+gcloud artifacts docker images list \
+us-west1-docker.pkg.dev/certain-density-406704/my-docker-repo/flood-detection-training-tf-cpu.2-13.py310 [--include-tags]
+
+
+gcloud ai custom-jobs local-run \
+  --executor-image-uri=tensorflow/tensorflow:2.15.0 \
+  --local-package-path=~/test-cloud-distro/flood-detection \
+  --python-module=trainer.task \
+  --output-image-uri=flood-detection-training-tf-cpu.2-15.py310 \
+  -- \
+  --parameter-config=local_s1_parameter_config.json \
+  --model-config=local_s1_model_config.json \
+  --save-model
+
+
+
+export TRAIN_ENV="local"
+export MODEL_TYPE="single"
+export LOG_LEVEL="DEBUG"
+export MODEL_ID=0

@@ -142,11 +142,11 @@ def format_filename(data_type: DataType, data_source: DataSource, suffix: str = 
     return filename
 
 
-def save_models(models: List[Model], data_source: DataSource, base_path: str, env: str):
+def save_models(models: List[Model], data_source: DataSource, base_path: str, ext=False):
 
     for i, model in enumerate(models):
         suffix = f"fold_{model.model_id}"
-        filename = format_filename(DataType.MODEL, data_source, suffix=suffix, ext=False)
+        filename = format_filename(DataType.MODEL, data_source, suffix=suffix, ext=ext)
         save_path = os.path.join(base_path, filename)
         try:
             model.save(save_path)

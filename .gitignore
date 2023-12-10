@@ -9,3 +9,6 @@ venv/
 checkpoints/
 dist/
 trainer.egg-info/
+sample_gloud_command.txt
+Dockerfile
+*.npy

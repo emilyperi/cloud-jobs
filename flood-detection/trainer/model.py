@@ -1,39 +1,56 @@
 import os.path
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 import numpy as np
 from sklearn.model_selection import StratifiedKFold
 import tensorflow as tf
 from tensorflow.keras.applications import ResNet50
 from tensorflow.keras.callbacks import TensorBoard, ModelCheckpoint, EarlyStopping
-from tensorflow.keras.layers import BatchNormalization, Input
+from tensorflow.keras.layers import BatchNormalization, Input, Conv2D, Layer
+from tensorflow.keras.optimizers import Optimizer
+from tensorflow.keras.losses import Loss
+from tensorflow.keras.metrics import Metric
 
-from trainer.env import TENSORBOARD_DIR, CHECKPOINT_DIR, CHECKPOINT_TEMPLATE, GPU_ENABLED
+from trainer.env import CHECKPOINT_TEMPLATE, TRAIN_ENV, GPU_ENABLED
+from trainer.cloud_env import cloud_config
+from trainer.local_env import local_config
 from trainer.dtypes import Parameters, Score, ModelConfig
 from trainer.exceptions import UninitializedModelError, UntrainedModelError, KModelValueError
 from trainer.utils import get_function_stdout, sigmoid
 from trainer.logging import logger
 
+if TRAIN_ENV == 'cloud':
+    tensorboard_dir = cloud_config["TENSORBOARD_DIR"]
+    base_checkpoint_dir = cloud_config["CHECKPOINT_DIR"]
+else:
+    tensorboard_dir = local_config["TENSORBOARD_DIR"]
+    base_checkpoint_dir = local_config["CHECKPOINT_DIR"]
+
 
 class Model:
-    log_dir = TENSORBOARD_DIR
-    base_check_dir = CHECKPOINT_DIR
     check_template = CHECKPOINT_TEMPLATE
     gpu_enabled = GPU_ENABLED
 
-    def __init__(self, model_id):
+    def __init__(self, model_id, min_epochs=1):
         self._model = None
         self._base_model = None
         self.history = None
         self.model_id = model_id
 
-        self.tensorboard_dir = os.path.join(Model.log_dir, f"fold_{model_id}")
-        self.checkpoint_dir = os.path.join(Model.base_check_dir, f"fold_{model_id}")
+        self.tensorboard_dir = os.path.join(tensorboard_dir, f"fold_{model_id}")
+        self.checkpoint_dir = os.path.join(base_checkpoint_dir, f"fold_{model_id}")
         checkpoint_path = os.path.join(self.checkpoint_dir, Model.check_template)
 
         self.callbacks = [TensorBoard(log_dir=self.tensorboard_dir, histogram_freq=1),
                           ModelCheckpoint(filepath=checkpoint_path, save_weights_only=True, save_freq='epoch'),
-                          EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)]
+                          EarlyStopping(monitor="val_binary_accuracy",
+                                        patience=3,
+                                        restore_best_weights=True,
+                                        min_delta=0.001,  # Minimum change to qualify as an improvement
+                                        baseline=None,  # Optional baseline value for the monitored quantity
+                                        verbose=1,
+                                        mode='auto',
+                                        start_from_epoch=min_epochs)]
 
     @property
     def model(self):
@@ -45,9 +62,13 @@ class Model:
             model, base_model = self.load_model(config.saved_model)
         else:
             model, base_model = self.create_model(config)
+
         logger.debug(f"Model {self.model_id} Summary {get_function_stdout(model.summary)}")
         self._model = model
         self._base_model = base_model
+
+    def is_compiled(self):
+        return self._model._is_compiled
 
     def create_model(self, config: ModelConfig):
         image_input = Input(shape=config.input_shape, name='image_input')
@@ -61,20 +82,30 @@ class Model:
         else:
             x = image_input
 
-        # ResNet50 as the base model
-        base_model = ResNet50(weights='imagenet', include_top=False, input_tensor=x)
-        base_model.trainable = False
+        # for layer in config.bottom_layers:
+        #     x = layer(x)
 
-        # Adding the base model
+        first_layer = Conv2D(filters=64, kernel_size=(7, 7), strides=(2, 2), padding='same')(x)
+
+        # ResNet50 as the base model
+        base_model = ResNet50(weights=None, include_top=False, input_tensor=first_layer)
+        base_model.trainable = True
+
         x = base_model(x)
 
-        for layer in config.layers:
+        for layer in config.top_layers:
             x = layer(x)
 
         # Create the model
         model = tf.keras.models.Model(inputs=image_input, outputs=x)
 
+        # latest_checkpoint = tf.train.latest_checkpoint(self.checkpoint_dir)
+        # model.load_weights(latest_checkpoint)
+
         return model, base_model
+
+    def compile(self, optimizer: Union[str, Optimizer], loss: Union[str, Loss], metrics: List[Union[str, Metric]]):
+        return self._model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
 
     def load_model(self, load_path):
         model = tf.keras.models.load_model(load_path.format(self.model_id))
@@ -96,9 +127,9 @@ class Model:
         if self.gpu_enabled:
             strategy = tf.distribute.MirroredStrategy()
             with strategy.scope():
-                self._model.compile(optimizer=params.optimizer, loss=params.loss, metrics=params.metrics)
+                self.compile(optimizer=params.optimizer, loss=params.loss, metrics=params.metrics)
         else:
-            self._model.compile(optimizer=params.optimizer, loss=params.loss, metrics=params.metrics)
+            self.compile(optimizer=params.optimizer, loss=params.loss, metrics=params.metrics)
 
         if tf.io.gfile.exists(self.checkpoint_dir):
             logger.debug(f"Loading from checkpoint {self.checkpoint_dir}")
@@ -121,9 +152,11 @@ class Model:
             raise UninitializedModelError("Cannot make predictions with un-initialized model")
 
         if apply_sigmoid:
-            return sigmoid(self._model.predict(test_images))
-
-        return self._model.predict(test_images)
+            predictions = sigmoid(self._model.predict(test_images))
+        else:
+            predictions = self._model.predict(test_images)
+        #logger.info(f"Model predictions {predictions}")
+        return predictions
 
     def binary_labels(self, predictions, threshold=0.5):
         if not self._model:
@@ -148,7 +181,7 @@ class Model:
         if not self._model:
             raise UninitializedModelError("Cannot load model for un-initialized model")
 
-        return self._model.v(test_images, test_labels)
+        return self._model.evaluate(test_images, test_labels)
 
     def get_score(self, metric_key):
         if not self.history:
@@ -161,11 +194,11 @@ class Model:
 
 
 class KModels:
-    def __init__(self, k: int):
+    def __init__(self, k: int, min_epochs: int):
         if k < 2:
             raise KModelValueError("Number of folds k must be greater than 1")
         self.k = k
-        self.models = [Model(model_id=i) for i in range(k)]
+        self.models = [Model(model_id=i, min_epochs=min_epochs) for i in range(k)]
         self.scores: List[Score] = []
         self.split = None
 
