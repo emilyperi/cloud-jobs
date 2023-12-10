@@ -1,18 +1,24 @@
 import logging
-from google.cloud import storage
-from trainer.env import config
+import tempfile
+import os
+from trainer.env import TRAIN_ENV, TIMESTAMP, LOG_LEVEL
 
-if config["TRAIN_ENV"].lower() == 'cloud':
-    log_file_path = config["TEMP_LOG_FILE"]
+LOG_DIR = os.environ.get("LOG_DIR", "logs")
+TEMP_LOG_FILE_NAME = tempfile.NamedTemporaryFile(mode='w', delete=False).name
+LOG_SAVE_PATH = f'{LOG_DIR}/trainer{TIMESTAMP}.log'
+
+if TRAIN_ENV.lower() == 'cloud':
+    log_file_path = TEMP_LOG_FILE_NAME
+
 else:
-    log_file_path = f'{config["LOCAL_LOG_DIR"]}/trainer{config["TIMESTAMP"]}.log'
+    log_file_path = LOG_SAVE_PATH
 
 # Set the root logger to a higher level, e.g., WARNING
 logging.basicConfig(level=logging.WARNING)
 
 # Configure application's logger for a lower level
 logger = logging.getLogger(__name__)
-logger.setLevel(config["LOG_LEVEL"])
+logger.setLevel(LOG_LEVEL)
 
 # File handler - logs to a file
 file_handler = logging.FileHandler(log_file_path)
@@ -26,13 +32,4 @@ stream_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(leveln
 logger.addHandler(file_handler)
 logger.addHandler(stream_handler)
 
-logger.info(f"Job configuration values: {config}")
 
-
-def upload_blob(bucket_name=config["BUCKET"], source_file_name=log_file_path, destination_blob_name=f'logs/trainer{config["TIMESTAMP"]}.log'):
-    """Uploads a file to the bucket."""
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(destination_blob_name)
-
-    blob.upload_from_filename(source_file_name)
